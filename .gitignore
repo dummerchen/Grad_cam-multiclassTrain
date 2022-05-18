@@ -1,0 +1,9 @@
+.idea/
+__pycache__/
+logs/
+temp/
+temps/
+temp
+weights/
+fcm.py
+gen.py
