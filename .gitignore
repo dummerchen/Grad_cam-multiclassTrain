@@ -3,7 +3,10 @@ __pycache__/
 logs/
 temp/
 temps/
-temp
+temp.py
 weights/
 fcm.py
 gen.py
+*.tar
+*.zip
+*.gz

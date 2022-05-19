@@ -4,11 +4,13 @@
 # @Time : 2022/5/16 12:36
 import argparse
 from torchvision import transforms
-from torchvision.models import resnet18
+from torchvision.datasets import CIFAR10
+from torchvision.models import resnet18,resnet50
 from torch.utils.data import Dataset,DataLoader
 import torch
 import os
-from utils import GradCam,Logger,MyDataset
+from utils import GradCam,Logger,collate_fn
+from dataset import MyDataset,VocDataset
 import torch.backends.cudnn as cudnn
 from torch.utils import tensorboard
 from tqdm import tqdm
@@ -40,37 +42,47 @@ def main(opts):
         'train':transforms.Compose([
             transforms.ToPILImage(),
             transforms.ToTensor(),
-            transforms.CenterCrop(224),
+            transforms.RandomResizedCrop(256),
+            transforms.RandomHorizontalFlip(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ]),
         'val':transforms.Compose([
             transforms.ToPILImage(),
             transforms.ToTensor(),
-            transforms.CenterCrop(224),
+            transforms.RandomResizedCrop(256),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
     }
-    train_dataset = MyDataset(root=opts.root_dir,train_or_val='train', transforms=data_transforms['train'])
-    val_dataset = MyDataset(root=opts.root_dir,train_or_val='val',transforms=data_transforms['val'])
+    train_dataset = VocDataset(root=opts.root_dir,train_or_val='train', transforms=data_transforms['train'])
+    val_dataset = VocDataset(root=opts.root_dir,train_or_val='val',transforms=data_transforms['val'])
+    # train_dataset = MyDataset(root=opts.root_dir,train_or_val='train', transforms=data_transforms['train'])
+    # val_dataset = MyDataset(root=opts.root_dir,train_or_val='val',transforms=data_transforms['val'])
 
-    train_dataloader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                               batch_size=batchsize,
-                                               shuffle=True)  # 将数据打乱
-    val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset,
-                                              batch_size=batchsize,
-                                              shuffle=False)
+    # train_dataset=CIFAR10(root='./', download=False, train=True, transform=data_transforms['train'])
+    # val_dataset = CIFAR10(root='./', download=False, train=False, transform=data_transforms['train'])
 
-    model=resnet18(pretrained=True)
-    model.fc=torch.nn.Linear(512,69)
+    train_dataloader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batchsize,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+    val_dataloader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batchsize,
+        shuffle=False,
+        collate_fn=collate_fn
+    )
+
+    model=resnet50(pretrained=True)
+    model.fc=torch.nn.Linear(2048,20)
     model.to(device)
 
-    feature_names=[model.layer4[1].conv2]
-
-    loss_func=torch.nn.CrossEntropyLoss()
-    optimizer=torch.optim.Adam(lr=opts.learning_rate,params=model.parameters(),betas=(0.9,0.99))
+    loss_func=torch.nn.MultiLabelSoftMarginLoss()
+    optimizer=torch.optim.Adam(lr=opts.learning_rate,params=model.parameters())
     if  opts.weights!=None and os.path.exists(opts.weights):
         # 加载模型
-        params=torch.load(opts.gweights,map_location=device)
+        params=torch.load(opts.weights,map_location=device)
         optimizer.load_state_dict(params['optimizer'])
         model.load_state_dict(params['weights'])
         start_epoch=params['epoch']
@@ -80,13 +92,18 @@ def main(opts):
         model.train()
         train_bar=tqdm(train_dataloader)
         train_mean_loss=0
+        tot=0
         for data,label in train_bar:
             data,label=data.to(device),label.to(device)
             res=model(data)
+            res=torch.nn.Softmax()(res)
             loss=loss_func(res,label)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            tot+=1
+            # if tot>2:
+            #     break
             with torch.no_grad():
                 train_mean_loss+=loss.item()
                 train_bar.set_description(desc='Train Epoch[{}/{}] loss:{}'.format(epoch,opts.epoch,loss.item()))
@@ -100,17 +117,18 @@ def main(opts):
             model.eval()
 
             # 画图
-            data, label = next(iter(val_dataloader))
-            c,h,w=data[0].shape
-            cam = GradCam(feature_names, target_size=(h,w))
-
-            res=model(torch.unsqueeze(data[0],dim=0).to(device))
-            pre=torch.argmax(res)
-            res[0,pre].backward()
-            images, masks = cam.cal_cam(data[0].permute(1, 2, 0).numpy() / 255.)
-
-            writer.add_images('resnet/epoch_' + str(epoch) + '_image',
-                              torch.unsqueeze(torch.Tensor(images[0].transpose(2,0,1)),dim=0), epoch)
+            # data, label = next(iter(val_dataloader))
+            # c,h,w=data[0].shape
+            # cam = GradCam([model.layer4[2].conv3], target_size=(h,w))
+            #
+            # res=model(torch.unsqueeze(data[0],dim=0).to(device))
+            # res = torch.nn.Sigmoid()(res)
+            # pre=torch.argmax(res)
+            # res[0,pre].backward()
+            # images, masks = cam.cal_cam(data[0].permute(1, 2, 0).numpy())
+            #
+            # writer.add_images('resnet/epoch_' + str(epoch) + '_image',
+            #                   torch.unsqueeze(torch.Tensor(images[0].transpose(2,0,1)),dim=0), epoch)
 
             val_bar=tqdm(val_dataloader)
             val_mean_loss = 0
@@ -121,9 +139,13 @@ def main(opts):
                     data, label = data.to(device), label.to(device)
 
                     res=model(data)
-                    pre=torch.argmax(res,dim=1)
-                    acc=accuracy_score(label,pre)
-                    f1=f1_score(label,pre,average='macro')
+                    res = torch.nn.Softmax()(res)
+
+                    pre=res.numpy()
+                    pre[pre>0.5]=1
+                    pre[pre<0.5]=0
+                    acc=accuracy_score(label.cpu().detach().numpy(),pre)
+                    f1=f1_score(label.cpu().detach().numpy(),pre,average='macro')
                     loss=loss_func(res,label)
 
                     val_mean_loss+=loss.item()
@@ -132,7 +154,6 @@ def main(opts):
 
                     val_bar.set_description(desc='val Epoch:{} Loss:{} acc:{} f1:{}'.format(epoch,loss.item(),acc,f1))
                     # 每次只输出最后一组的验证结果
-                confusion_matrix()
                 val_mean_loss/=len(val_bar)
                 val_mean_acc/=len(val_bar)
                 val_mean_f1/=len(val_bar)
@@ -146,19 +167,19 @@ def main(opts):
                 'epoch':epoch,
                 'optimizer':optimizer.state_dict(),
                 }
-            torch.save(state_dict,'./weights/resnet_indoor_{}.pth'.format(epoch))
+            torch.save(state_dict,'./weights/resnet_voc_{}.pth'.format(epoch))
     writer.close()
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser()
     args.add_argument('--batchsize', '-bs', default=16, type=int)
-    args.add_argument('--root_dir', '-rd', default='../datasets/Images', type=str)
+    args.add_argument('--root_dir', '-rd', default='../datasets/VOC2012', type=str)
     args.add_argument('--seed', default=1314, type=int)
-    args.add_argument('--weights', '-gw', default=None, type=str)
+    args.add_argument('--weights', '-w', default=None, type=str)
     args.add_argument('--logs_dir', '-ld', default='./logs', type=str)
-    args.add_argument('--learning_rate', '-lr', default=0.0001, type=float)
-    args.add_argument('--epoch', '-e', default=50, type=int)
-    args.add_argument('--save_epoch', '-se', default=2, type=int)
+    args.add_argument('--learning_rate', '-lr', default=0.001, type=float)
+    args.add_argument('--epoch', '-e', default=100, type=int)
+    args.add_argument('--save_epoch', '-se', default=1, type=int)
     args.add_argument('--workers', '-wks', default=None, type=int)
 
     opts = args.parse_args()

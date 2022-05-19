@@ -8,10 +8,7 @@ import cv2
 from torch import nn
 import logging
 from logging.handlers import RotatingFileHandler
-from torch.utils.data import Dataset,DataLoader
-
 from torch.utils.data.dataloader import default_collate
-import os
 
 def collate_fn(batch):
     '''
@@ -23,54 +20,32 @@ def collate_fn(batch):
         return torch.Tensor()
     return default_collate(batch) # 用默认方式拼接过滤后的batch数据
 
-class MyDataset(Dataset):
-    def __init__(self,root='../datasets/Images',train_or_val='train',transforms=None):
-        super(MyDataset, self).__init__()
-        with open(root+'/'+train_or_val+'.txt',"r") as f:
-            self.images=f.readlines()
-        self.images=[root+'/'+i.replace('\n','') for i in self.images]
-        self.transforms=transforms
-        self.class_dict=os.listdir(root)
+def normalize(I):
+    # 归一化梯度map，先归一化到 mean=0 std=1
+    norm = (I - I.mean()) / I.std()
+    # 把 std 重置为 0.1，让梯度map中的数值尽可能接近 0
+    norm = norm * 0.1
+    # 均值加 0.5，保证大部分的梯度值为正
+    norm = norm + 0.5
+    # 把 0，1 以外的梯度值分别设置为 0 和 1
+    norm = norm.clip(0, 1)
+    return norm
 
-    def __len__(self):
-        return len(self.images)
-    def __getitem__(self, item):
-        path=self.images[item]
-        # BGR输入
-        image=cv2.imread(path)
-        if image==None:
-            print('{} is not found'.format(path))
-            return None,None
-        image=self.transforms(image)
-        label=self.class_dict.index(path.split('/')[3])
-        return image,label
 
 class GuideBackPropagation:
     def __init__(self,model,model_name:list):
         self.fh=[]
-        self.bh=[]
         self.model=model
 
         # 所有relu层都注册
-        for name, module in model.features.named_children():
-            if isinstance(module, nn.ReLU):
-                module.register_forward_hook(self.forward_hook)
-                module.register_full_backward_hook(self.backward_hook)
+        for m in self.model.modules():
+            if isinstance(m, nn.ReLU):
+                m.register_forward_hook(self.forward_hook)
+                m.register_full_backward_hook(self.backward_hook)
         # 第一个卷积层位置
 
         for i in model_name:
             i.register_full_backward_hook(self.first_backward_hook)
-
-    def normalize(self,I):
-        # 归一化梯度map，先归一化到 mean=0 std=1
-        norm = (I - I.mean()) / I.std()
-        # 把 std 重置为 0.1，让梯度map中的数值尽可能接近 0
-        norm = norm * 0.1
-        # 均值加 0.5，保证大部分的梯度值为正
-        norm = norm + 0.5
-        # 把 0，1 以外的梯度值分别设置为 0 和 1
-        norm = norm.clip(0, 1)
-        return norm
 
     def forward_hook(self,module,input,output):
         self.fh.append(output.cpu().detach().numpy())
@@ -80,7 +55,7 @@ class GuideBackPropagation:
         # BCHW-> CHW ->h,w,c
         self.image=grad_in[0].cpu().detach()[0]
         self.image=self.image.permute(1,2,0).numpy()
-        self.image=self.normalize(self.image)
+        self.image=normalize(self.image)
         pass
     def backward_hook(self,module, grad_in, grad_out):
         a=self.fh.pop()
@@ -133,20 +108,22 @@ class GradCam:
         self.Image=[]
         self.masks=[]
         for a, a_ in zip(self.fh, self.bh):
-            # B,C,W,H -> B,C,1,1
-
+            # B,C,H,W -> B,C,1,1
             alpha = np.mean(a_, axis=(2,3),keepdims=True)
-            # BC,1,1-> B,1,1
+            # B,C,H,W-> B,H,W
             mat = np.sum(alpha*a,axis=1)
             # relu
             mat[mat<0]=0
             # 转换到0-1
+            # 1,w,h
             mat=(mat-np.min(mat))/(np.max(mat)+1e-7)
+
             if self.target_size!=None:
                 # targetsize W,H
-                mask=cv2.resize(mat,self.target_size)
+                mask=cv2.resize(mat[0],self.target_size)
             else:
-                mask=mat
+                mask=mat[0]
+            image=normalize(image)
             image=self.get_rgb_image(image,mask,colormap=colormap,rgb_or_bgr=rgb_or_bgr,use_heatmap=use_heatmap)
             self.masks.append(mask)
             self.Image.append(image)
@@ -157,7 +134,7 @@ class Logger():
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(level=level)
 
-        handler = RotatingFileHandler(file_path,maxBytes=1024,backupCount=3)
+        handler = RotatingFileHandler(file_path,maxBytes=1024,backupCount=1)
         handler.setLevel(level)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
