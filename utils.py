@@ -9,6 +9,17 @@ from torch import nn
 import logging
 from logging.handlers import RotatingFileHandler
 from torch.utils.data.dataloader import default_collate
+from sklearn.metrics import average_precision_score
+
+
+def compute_mAP(labels, outputs):
+    y_true = labels.cpu().detach().numpy()
+    y_pred = outputs.cpu().detach().numpy()
+    AP = []
+    for i in range(y_true.shape[0]):
+        AP.append(average_precision_score(y_true[i], y_pred[i]))
+    return np.mean(AP)
+
 
 def collate_fn(batch):
     '''
@@ -20,13 +31,13 @@ def collate_fn(batch):
         return torch.Tensor()
     return default_collate(batch) # 用默认方式拼接过滤后的batch数据
 
-def normalize(I):
+def normalize(I,std=0.1,mean=0.5):
     # 归一化梯度map，先归一化到 mean=0 std=1
     norm = (I - I.mean()) / I.std()
     # 把 std 重置为 0.1，让梯度map中的数值尽可能接近 0
-    norm = norm * 0.1
+    norm = norm * std
     # 均值加 0.5，保证大部分的梯度值为正
-    norm = norm + 0.5
+    norm = norm + mean
     # 把 0，1 以外的梯度值分别设置为 0 和 1
     norm = norm.clip(0, 1)
     return norm
@@ -123,7 +134,7 @@ class GradCam:
                 mask=cv2.resize(mat[0],self.target_size)
             else:
                 mask=mat[0]
-            image=normalize(image)
+            # image=normalize(image)
             image=self.get_rgb_image(image,mask,colormap=colormap,rgb_or_bgr=rgb_or_bgr,use_heatmap=use_heatmap)
             self.masks.append(mask)
             self.Image.append(image)
@@ -134,9 +145,9 @@ class Logger():
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(level=level)
 
-        handler = RotatingFileHandler(file_path,maxBytes=1024,backupCount=1)
+        handler = logging.FileHandler(file_path)
         handler.setLevel(level)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s-%(levelname)s-%(message)s')
         handler.setFormatter(formatter)
 
         console = logging.StreamHandler()

@@ -9,7 +9,7 @@ from torchvision.models import resnet18,resnet50
 from torch.utils.data import Dataset,DataLoader
 import torch
 import os
-from utils import GradCam,Logger,collate_fn
+from utils import GradCam,Logger,collate_fn,compute_mAP
 from dataset import MyDataset,VocDataset
 import torch.backends.cudnn as cudnn
 from torch.utils import tensorboard
@@ -92,26 +92,30 @@ def main(opts):
         model.train()
         train_bar=tqdm(train_dataloader)
         train_mean_loss=0
+        train_mean_acc=0
         tot=0
         for data,label in train_bar:
             data,label=data.to(device),label.to(device)
             res=model(data)
             res=torch.nn.Softmax()(res)
             loss=loss_func(res,label)
+            acc=compute_mAP(label,res)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             tot+=1
-            # if tot>2:
-            #     break
+            if tot>2:
+                break
             with torch.no_grad():
                 train_mean_loss+=loss.item()
-                train_bar.set_description(desc='Train Epoch[{}/{}] loss:{}'.format(epoch,opts.epoch,loss.item()))
+                train_mean_acc+=acc
+
+                train_bar.set_description(desc='Train Epoch[{}/{}] loss:{} mAP:{}'.format(epoch,opts.epoch,loss.item(),acc))
 
         train_mean_loss=train_mean_loss/len(train_bar)
         writer.add_scalar('train_loss',train_mean_loss,epoch)
 
-        logger.info('train_loss:{}\n'.format(train_mean_loss))
+        logger.info('[Epoch:{}] train_loss:{} train_mAP:{}\n'.format(epoch,train_mean_loss,train_mean_acc))
 
         if epoch%opts.save_epoch==0:
             model.eval()
@@ -137,31 +141,26 @@ def main(opts):
             with torch.no_grad():
                 for data,label in val_bar:
                     data, label = data.to(device), label.to(device)
-
                     res=model(data)
-                    res = torch.nn.Softmax()(res)
 
-                    pre=res.numpy()
-                    pre[pre>0.5]=1
-                    pre[pre<0.5]=0
-                    acc=accuracy_score(label.cpu().detach().numpy(),pre)
-                    f1=f1_score(label.cpu().detach().numpy(),pre,average='macro')
+                    acc=compute_mAP(label,res)
+                    # f1=f1_score(label.cpu().detach().numpy(),pre,average='macro')
                     loss=loss_func(res,label)
 
                     val_mean_loss+=loss.item()
                     val_mean_acc+=acc
-                    val_mean_f1+=f1
+                    # val_mean_f1+=f1
 
-                    val_bar.set_description(desc='val Epoch:{} Loss:{} acc:{} f1:{}'.format(epoch,loss.item(),acc,f1))
+                    val_bar.set_description(desc='val Epoch:{} Loss:{} mAP:{}'.format(epoch,loss.item(),acc))
                     # 每次只输出最后一组的验证结果
                 val_mean_loss/=len(val_bar)
                 val_mean_acc/=len(val_bar)
-                val_mean_f1/=len(val_bar)
+                # val_mean_f1/=len(val_bar)
                 writer.add_scalar('val_mean_loss',val_mean_loss,epoch)
-                writer.add_scalar('val_mean_f1',val_mean_f1,epoch)
+                # writer.add_scalar('val_mean_f1',val_mean_f1,epoch)
                 writer.add_scalar('val_mean_acc',val_mean_acc,epoch)
 
-                logger.info('val_mean_loss:{} mean_acc:{} mean f1:{}\n'.format(val_mean_loss, val_mean_acc,val_mean_f1))
+                logger.info('[Epoch:{}] val_mean_loss:{} mean_mAP:{}\n'.format(epoch,val_mean_loss, val_mean_acc))
             state_dict={
                 'weights':model.state_dict(),
                 'epoch':epoch,

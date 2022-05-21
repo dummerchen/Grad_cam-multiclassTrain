@@ -10,3 +10,6 @@ gen.py
 *.tar
 *.zip
 *.gz
+result/
+results/
+*.iprof
